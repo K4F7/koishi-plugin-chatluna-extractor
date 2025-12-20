@@ -5,39 +5,62 @@ export const name = 'chatluna-extractor'
 export const inject = ['chatluna_character']
 
 export const usage = `
-## 使用说明
+提取 chatluna-character 回复中的 XML 标签内容，并通过自定义指令输出。
 
-此插件用于提取 chatluna-character 输出中特定 XML 标签的内容。
+## 配置步骤
 
-- 默认提取 \`<think>\` 标签内容
-- 可在配置中添加或删除要提取的标签
-- 每个标签会自动注册对应的指令，例如配置了 \`think\` 标签，就会注册 \`think\` 指令
-- 只保留最新一条回复的提取内容
+**1. 定义标签** → 设置要提取的 XML 标签（如 \`think\`、\`memory\`）
+
+**2. 创建指令** → 为每个指令设置名称和输出格式
+
+## 可用变量
+
+| 变量 | 说明 |
+|------|------|
+| \`{name}\` | 角色名称 |
+| \`{标签名}\` | 对应标签的内容 |
+
+## 示例
+
+配置标签：\`think\`, \`memory\`
+
+| 指令 | 格式 | 输出 |
+|------|------|------|
+| 思考 | \`{name}在想：{think}\` | syn在想：嗯？新人？ |
+| 记忆 | \`{name}的记忆：{memory}\` | syn的记忆：1.[临时] 群友打招呼 |
 `
 
-export interface TagConfig {
-    tag: string
+// 指令配置
+export interface CommandConfig {
+    name: string
     format: string
 }
 
 export interface Config {
     characterName: string
-    tags: TagConfig[]
+    tags: string[]
+    commands: CommandConfig[]
 }
 
 export const Config: Schema<Config> = Schema.object({
     characterName: Schema.string()
         .default('AI')
-        .description('角色名称，用于格式化输出'),
-    tags: Schema.array(Schema.object({
-        tag: Schema.string()
+        .description('角色名称，可在格式中使用 {name} 引用'),
+    tags: Schema.array(Schema.string())
+        .default(['think', 'memory', 'relationship'])
+        .description('要提取的 XML 标签列表（不包含尖括号）。每个标签会成为可用变量，如 {think}'),
+    commands: Schema.array(Schema.object({
+        name: Schema.string()
             .required()
-            .description('要提取的 XML 标签名（不包含尖括号）'),
+            .description('指令名称'),
         format: Schema.string()
-            .default('{name}在想：\n{content}')
-            .description('输出格式模板。{name} 为角色名，{content} 为提取的内容'),
-    })).default([{ tag: 'think', format: '{name}在想：\n{content}' }])
-        .description('标签配置列表'),
+            .role('textarea')
+            .default('{name}在想：\n{think}')
+            .description('输出格式。可用变量：{name}（角色名）以及所有已定义的标签如 {think}'),
+    })).default([
+        { name: 'think', format: '{name}在想：\n{think}' },
+        { name: 'extract', format: '{name}在想：\n{think}\n记忆是：\n{memory}\n我们现在的关系是：\n{relationship}' }
+    ]).description('指令列表'),
 })
 
 // 扩展 Context 类型
@@ -74,18 +97,18 @@ export function apply(ctx: Context, config: Config) {
         return matches.length > 0 ? matches.join('\n\n') : null
     }
 
-    // 处理模型响应，提取标签内容
+    // 处理模型响应，提取所有配置的标签内容
     function processModelResponse(guildId: string, response: string): void {
         // 重置该群组的提取内容
         const guildContents = new Map<string, string | null>()
         extractedContents.set(guildId, guildContents)
 
-        for (const tagConfig of config.tags) {
-            const tagContent = extractTagContent(response, tagConfig.tag)
+        for (const tag of config.tags) {
+            const tagContent = extractTagContent(response, tag)
 
             if (tagContent) {
-                logger.info(`[${guildId}] 提取到 <${tagConfig.tag}> 标签内容: ${tagContent.substring(0, 100)}...`)
-                guildContents.set(tagConfig.tag, tagContent)
+                logger.info(`[${guildId}] 提取到 <${tag}> 标签内容: ${tagContent.substring(0, 100)}...`)
+                guildContents.set(tag, tagContent)
             }
         }
     }
@@ -132,43 +155,53 @@ export function apply(ctx: Context, config: Config) {
         logger.warn('无法拦截 chatluna_character.logger，logger 不存在或 debug 方法不可用')
     }
 
-    // 格式化输出内容
-    function formatOutput(content: string, format: string): string {
-        return format
-            .replace('{name}', config.characterName)
-            .replace('{content}', content)
+    // 格式化输出内容，替换所有变量
+    function formatOutput(format: string, guildContents: Map<string, string | null>): string {
+        let result = format.replace('{name}', config.characterName)
+
+        // 替换所有标签变量
+        for (const tag of config.tags) {
+            const content = guildContents.get(tag) || `（无${tag}内容）`
+            result = result.replace(new RegExp(`\\{${tag}\\}`, 'g'), content)
+        }
+
+        return result
     }
 
-    // 为每个标签注册指令
-    for (const tagConfig of config.tags) {
-        ctx.command(tagConfig.tag, `查看最新回复中 <${tagConfig.tag}> 标签的内容`)
+    // 为每个自定义指令注册
+    for (const cmd of config.commands) {
+        ctx.command(cmd.name)
             .action(({ session }) => {
                 if (!session) return '无法获取会话信息'
 
                 const guildId = session.guildId
                 const guildContents = extractedContents.get(guildId)
 
-                if (!guildContents) {
-                    return `没有 <${tagConfig.tag}> 标签包裹的信息`
+                if (!guildContents || guildContents.size === 0) {
+                    return '当前没有可用的标签内容'
                 }
 
-                const content = guildContents.get(tagConfig.tag)
-
-                if (!content) {
-                    return `没有 <${tagConfig.tag}> 标签包裹的信息`
-                }
-
-                return formatOutput(content, tagConfig.format)
+                return formatOutput(cmd.format, guildContents)
             })
     }
 
     // 注册查看所有标签的指令
-    ctx.command('extractor.list', '查看当前配置的所有标签')
+    ctx.command('extractor.tags', '查看当前配置的所有标签')
         .action(() => {
             if (config.tags.length === 0) {
                 return '当前没有配置任何标签。'
             }
 
-            return `当前配置的标签：\n${config.tags.map((t) => `- <${t.tag}> → ${t.format}`).join('\n')}`
+            return `当前配置的标签变量：\n${config.tags.map((t) => `- {${t}}`).join('\n')}`
+        })
+
+    // 注册查看所有指令的指令
+    ctx.command('extractor.commands', '查看当前配置的所有指令')
+        .action(() => {
+            if (config.commands.length === 0) {
+                return '当前没有配置任何指令。'
+            }
+
+            return `当前配置的指令：\n${config.commands.map((c) => `- ${c.name}：${c.format}`).join('\n')}`
         })
 }
