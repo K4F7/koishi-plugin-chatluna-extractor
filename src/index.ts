@@ -40,6 +40,7 @@ export interface Config {
     characterName: string
     tags: string[]
     commands: CommandConfig[]
+    showLogs: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -61,6 +62,9 @@ export const Config: Schema<Config> = Schema.object({
         { name: 'think', format: '{name}在想：\n{think}' },
         { name: 'extract', format: '{name}在想：\n{think}\n记忆是：\n{memory}\n我们现在的关系是：\n{relationship}' }
     ]).description('指令列表'),
+    showLogs: Schema.boolean()
+        .default(false)
+        .description('是否在控制台显示提取日志'),
 })
 
 // 扩展 Context 类型
@@ -107,7 +111,9 @@ export function apply(ctx: Context, config: Config) {
             const tagContent = extractTagContent(response, tag)
 
             if (tagContent) {
-                logger.info(`[${guildId}] 提取到 <${tag}> 标签内容: ${tagContent.substring(0, 100)}...`)
+                if (config.showLogs) {
+                    logger.info(`[${guildId}] 提取到 <${tag}> 标签内容: ${tagContent.substring(0, 100)}...`)
+                }
                 guildContents.set(tag, tagContent)
             }
         }
@@ -119,7 +125,9 @@ export function apply(ctx: Context, config: Config) {
     // 使用 chatluna_character.collect 来追踪当前处理的群组
     ctx.chatluna_character.collect(async (session) => {
         currentGuildId = session.guildId
-        logger.info(`[collect] 开始处理群组: ${currentGuildId}`)
+        if (config.showLogs) {
+            logger.info(`[collect] 开始处理群组: ${currentGuildId}`)
+        }
     })
 
     // 拦截 chatluna_character.logger 的 debug 输出
@@ -139,7 +147,9 @@ export function apply(ctx: Context, config: Config) {
                 const response = message.substring('model response: '.length)
 
                 if (currentGuildId) {
-                    logger.info(`[拦截] 捕获到模型响应，群组: ${currentGuildId}`)
+                    if (config.showLogs) {
+                        logger.info(`[拦截] 捕获到模型响应，群组: ${currentGuildId}`)
+                    }
                     processModelResponse(currentGuildId, response)
                 }
             }
